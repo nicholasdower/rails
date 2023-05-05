@@ -271,6 +271,21 @@ module ActiveRecord
         ActiveSupport::IsolatedExecutionState[:active_record_prepared_statements_disabled_cache] ||= Set.new
       end
 
+      # Throws away this connection and raises unless in a known transaction state
+      def check_in_known_transaction_state!
+        return unless @unknown_transaction_state
+
+        throw_away!
+        raise 'unknown transaction state'
+      end
+
+      # Wraps operations which, if they fail, leave the connection in a unknown transaction state.
+      def with_unknown_transaction_state(&block)
+        @unknown_transaction_state = true
+        block.call
+        @unknown_transaction_state = false
+      end
+
       class Version
         include Comparable
 

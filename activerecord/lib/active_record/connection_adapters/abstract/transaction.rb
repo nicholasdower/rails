@@ -398,7 +398,7 @@ module ActiveRecord
             if @connection.supports_lazy_transactions? && lazy_transactions_enabled? && _lazy
               @has_unmaterialized_transactions = true
             else
-              transaction.materialize!
+              @connection.with_unknown_transaction_state { transaction.materialize! }
             end
           end
           @stack.push(transaction)
@@ -467,7 +467,7 @@ module ActiveRecord
             current_transaction.written_indirectly ||= transaction.written || transaction.written_indirectly
           end
 
-          transaction.commit
+          @connection.with_unknown_transaction_state { transaction.commit }
           transaction.commit_records
         end
       end
@@ -476,7 +476,7 @@ module ActiveRecord
         @connection.lock.synchronize do
           transaction ||= @stack.last
           begin
-            transaction.rollback
+            @connection.with_unknown_transaction_state { transaction.rollback }
           ensure
             @stack.pop if @stack.last == transaction
           end
@@ -486,6 +486,7 @@ module ActiveRecord
 
       def within_new_transaction(isolation: nil, joinable: true)
         @connection.lock.synchronize do
+          @connection.check_in_known_transaction_state!
           transaction = begin_transaction(isolation: isolation, joinable: joinable)
           ret = yield
           completed = true

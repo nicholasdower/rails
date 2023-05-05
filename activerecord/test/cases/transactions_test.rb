@@ -81,7 +81,7 @@ class TransactionTest < ActiveRecord::TestCase
       ActiveRecord::Base.connection_handler.clear_all_connections!(:all)
     end
 
-    def test_connection_not_removed_from_pool_when_begin_raises_after_successfully_beginning_a_transaction
+    def test_connection_removed_from_pool_when_begin_raises_after_successfully_beginning_a_transaction
       connection = Topic.connection
       # Disable lazy transactions so that we will begin a transaction before attempting to write.
       connection.disable_lazy_transactions!
@@ -95,27 +95,26 @@ class TransactionTest < ActiveRecord::TestCase
         end
       end
 
-      # Begin a transaction. This will raise but no rollback will be performed and the connection will not be removed.
+      # Attempt to begin a transaction. This will raise causing a rollback and the connection to be removed.
       assert_raises(RuntimeError, 'begin failed') do
         ActiveRecord::Base.transaction { }
       end
-      assert connection.active?
-      assert Topic.connection_pool.connections.include?(connection)
 
-      # Use the connection to execute a statement. Since we are still in a transaction, this will not be committed.
+      # Attempt to start another transaction. This will cause the connection to be discarded.
       topic = topics(:fifth)
-      Topic.connection.execute("UPDATE topics SET topics.title = 'Updated title' WHERE topics.id = #{topic.id}")
-
-      # Discard the transaction. Nothing was ever committed.
-      Topic.connection.throw_away!
-
-      # We should see "Updated title" but we don't because the write happened inside the original transaction.
+      assert_raises(RuntimeError, 'unknown transaction state') do
+        ActiveRecord::Base.transaction do
+          topic.update(title: "Updated title")
+        end
+      end
+      assert_not connection.active?
+      assert_not Topic.connection_pool.connections.include?(connection)
       assert_equal "The Fifth Topic of the day", topic.reload.title
     ensure
       ActiveRecord::Base.connection_handler.clear_all_connections!(:all)
     end
 
-    def test_connection_not_removed_from_pool_when_rollback_raises_and_throw_away_raises
+    def test_connection_removed_from_pool_when_rollback_raises_and_throw_away_raises
       connection = Topic.connection
 
       # Update exec_rollback_db_transaction and throw_away! to raise.
@@ -127,11 +126,15 @@ class TransactionTest < ActiveRecord::TestCase
 
         alias :real_throw_away! :throw_away!
         define_method(:throw_away!) do
-          raise 'throw away failed'
+          unless @ran_once
+            @ran_once = true
+            raise 'throw away failed'
+          end
+          real_throw_away!
         end
       end
 
-      # Start a transaction, update a record, then rollback. The rollback and connection removal will fail.
+      # Start a transaction, perform an update, then rollback. The rollback and connection removal will fail.
       topic = topics(:fifth)
       assert_raises(RuntimeError, 'rollback failed') do
         ActiveRecord::Base.transaction do
@@ -142,25 +145,21 @@ class TransactionTest < ActiveRecord::TestCase
       assert connection.active?
       assert Topic.connection_pool.connections.include?(connection)
 
-      # Fetch the title on a separate connection to demonstrate that the transaction was not committed.
-      persisted_title = ActiveRecord::Base.connection_pool.checkout.exec_query(
-        "SELECT title from topics where id = #{topic.id}"
-      ).first['title']
-      assert_equal "The Fifth Topic of the day", persisted_title
-
-      # Update in a new transaction. This will commit the previous update which should have been rolled back.
-      ActiveRecord::Base.transaction do
-        topic.update(author_name: "Updated author")
+      # Attempt to start another transaction. This will cause the connection to be discarded.
+      topic = topics(:fifth)
+      assert_raises(RuntimeError, 'unknown transaction state') do
+        ActiveRecord::Base.transaction do
+          topic.update(title: "Updated title")
+        end
       end
-
-      # Both updates were committed.
-      assert_equal "Updated title", topic.reload.title
-      assert_equal "Updated author", topic.reload.author_name
+      assert_not connection.active?
+      assert_not Topic.connection_pool.connections.include?(connection)
+      assert_equal "The Fifth Topic of the day", topic.reload.title
     ensure
       ActiveRecord::Base.connection_handler.clear_all_connections!(:all)
     end
 
-    def test_connection_not_removed_from_pool_when_commit_raises_and_rollback_raises
+    def test_connection_removed_from_pool_when_commit_raises_and_rollback_raises
       connection = Topic.connection
 
       # Update commit_db_transaction to raise the first time it is called. Update exec_rollback_db_transaction to raise.
@@ -190,24 +189,17 @@ class TransactionTest < ActiveRecord::TestCase
       assert connection.active?
       assert Topic.connection_pool.connections.include?(connection)
 
-      # Fetch the title on a separate connection to demonstrate that the transaction was not committed.
-      persisted_title = ActiveRecord::Base.connection_pool.checkout.exec_query(
-        "SELECT title from topics where id = #{topic.id}"
-      ).first['title']
-      assert_equal "The Fifth Topic of the day", persisted_title
-
-      # Update in a new transaction. This will commit the previous update which should have been rolled back.
-      ActiveRecord::Base.transaction do
-        topic.update(author_name: "Updated author")
+      # Attempt to start another transaction. This will cause the connection to be discarded.
+      assert_raises(RuntimeError, 'unknown transaction state') do
+        ActiveRecord::Base.transaction { }
       end
-
-      # Both updates were committed.
-      assert_equal "Updated title", topic.reload.title
-      assert_equal "Updated author", topic.reload.author_name
+      assert_not connection.active?
+      assert_not Topic.connection_pool.connections.include?(connection)
+      assert_equal "The Fifth Topic of the day", topic.reload.title
     ensure
       ActiveRecord::Base.connection_handler.clear_all_connections!(:all)
     end
- end
+  end
 
   def test_rollback_dirty_changes_multiple_saves
     topic = topics(:fifth)
