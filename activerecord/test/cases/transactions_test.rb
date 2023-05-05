@@ -80,7 +80,138 @@ class TransactionTest < ActiveRecord::TestCase
     ensure
       ActiveRecord::Base.connection_handler.clear_all_connections!(:all)
     end
-  end
+
+    def test_connection_not_removed_from_pool_when_begin_raises_after_successfully_beginning_a_transaction
+      connection = Topic.connection
+      # Disable lazy transactions so that we will begin a transaction before attempting to write.
+      connection.disable_lazy_transactions!
+
+      # Update begin_db_transaction to successfully begin a transaction then raise.
+      Topic.connection.class_eval do
+        alias :real_begin_db_transaction :begin_db_transaction
+        define_method(:begin_db_transaction) do
+          real_begin_db_transaction
+          raise 'begin failed'
+        end
+      end
+
+      # Begin a transaction. This will raise but no rollback will be performed and the connection will not be removed.
+      assert_raises(RuntimeError, 'begin failed') do
+        ActiveRecord::Base.transaction { }
+      end
+      assert connection.active?
+      assert Topic.connection_pool.connections.include?(connection)
+
+      # Use the connection to execute a statement. Since we are still in a transaction, this will not be committed.
+      topic = topics(:fifth)
+      Topic.connection.execute("UPDATE topics SET topics.title = 'Updated title' WHERE topics.id = #{topic.id}")
+
+      # Discard the transaction. Nothing was ever committed.
+      Topic.connection.throw_away!
+
+      # We should see "Updated title" but we don't because the write happened inside the original transaction.
+      assert_equal "The Fifth Topic of the day", topic.reload.title
+    ensure
+      ActiveRecord::Base.connection_handler.clear_all_connections!(:all)
+    end
+
+    def test_connection_not_removed_from_pool_when_rollback_and_throw_away_raise
+      connection = Topic.connection
+
+      # Update rollback_transaction and throw_away! to raise.
+      Topic.connection.transaction_manager.class_eval do
+        alias :real_rollback_transaction :rollback_transaction
+        define_method(:rollback_transaction) do
+          raise 'rollback failed'
+        end
+      end
+
+      # Update throw_away! to raise.
+      Topic.connection.class_eval do
+        alias :real_throw_away! :throw_away!
+        define_method(:throw_away!) do
+          raise 'throw away failed'
+        end
+      end
+
+      # Start a transaction, update a record, then rollback. The rollback and connection removal will fail.
+      topic = topics(:fifth)
+      assert_raises(RuntimeError, 'rollback failed') do
+        ActiveRecord::Base.transaction do
+          topic.update(title: "Updated title")
+          raise ActiveRecord::Rollback
+        end
+      end
+      assert connection.active?
+      assert Topic.connection_pool.connections.include?(connection)
+
+      # Fetch the title on a separate connection to demonstrate that the transaction was not committed.
+      persisted_title = ActiveRecord::Base.connection_pool.checkout.exec_query(
+        "SELECT title from topics where id = #{topic.id}"
+      ).first['title']
+      assert_equal "The Fifth Topic of the day", persisted_title
+
+      # Update in a new transaction. This will commit the previous update which should have been rolled back.
+      ActiveRecord::Base.transaction do
+        topic.update(author_name: "Updated author")
+      end
+
+      # Both updates were committed.
+      assert_equal "Updated title", topic.reload.title
+      assert_equal "Updated author", topic.reload.author_name
+    ensure
+      ActiveRecord::Base.connection_handler.clear_all_connections!(:all)
+    end
+
+    def test_connection_not_removed_from_pool_when_commit_raises_and_rollback_raises
+      connection = Topic.connection
+
+      # Update commit_transaction to raise the first time it is called.
+      # Update rollback_transaction to raise.
+      Topic.connection.transaction_manager.class_eval do
+        alias :real_commit_transaction :commit_transaction
+        define_method(:commit_transaction) do
+          unless @ran_once
+            @ran_once = true
+            raise 'commit failed'
+          end
+          real_commit_transaction
+        end
+
+        alias :real_rollback_transaction :rollback_transaction
+        define_method(:rollback_transaction) do |_transaction = nil|
+          raise 'rollback failed'
+        end
+      end
+
+      # Start a transaction and update a record. The commit and rollback will fail.
+      topic = topics(:fifth)
+      assert_raises(RuntimeError, 'rollback failed') do
+        ActiveRecord::Base.transaction do
+          topic.update(title: "Updated title")
+        end
+      end
+      assert connection.active?
+      assert Topic.connection_pool.connections.include?(connection)
+
+      # Fetch the title on a separate connection to demonstrate that the transaction was not committed.
+      persisted_title = ActiveRecord::Base.connection_pool.checkout.exec_query(
+        "SELECT title from topics where id = #{topic.id}"
+      ).first['title']
+      assert_equal "The Fifth Topic of the day", persisted_title
+
+      # Update in a new transaction. This will commit the previous update which should have been rolled back.
+      ActiveRecord::Base.transaction do
+        topic.update(author_name: "Updated author")
+      end
+
+      # Both updates were committed.
+      assert_equal "Updated title", topic.reload.title
+      assert_equal "Updated author", topic.reload.author_name
+    ensure
+      ActiveRecord::Base.connection_handler.clear_all_connections!(:all)
+    end
+ end
 
   def test_rollback_dirty_changes_multiple_saves
     topic = topics(:fifth)
