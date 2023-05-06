@@ -105,6 +105,7 @@ module ActiveRecord
       end
 
       def query(sql, name = nil) # :nodoc:
+        transaction_manager.check_transaction_lock!
         internal_exec_query(sql, name).rows
       end
 
@@ -128,6 +129,7 @@ module ActiveRecord
       # method may be manually memory managed. Consider using #exec_query
       # wrapper instead.
       def execute(sql, name = nil, allow_retry: false)
+        transaction_manager.check_transaction_lock!
         internal_execute(sql, name, allow_retry: allow_retry)
       end
 
@@ -139,6 +141,7 @@ module ActiveRecord
       # will be cleared. If the query is read-only, consider using #select_all
       # instead.
       def exec_query(sql, name = "SQL", binds = [], prepare: false)
+        transaction_manager.check_transaction_lock!
         internal_exec_query(sql, name, binds, prepare: prepare)
       end
 
@@ -146,6 +149,7 @@ module ActiveRecord
       # +binds+ as the bind substitutes. +name+ is logged along with
       # the executed +sql+ statement.
       def exec_insert(sql, name = nil, binds = [], pk = nil, sequence_name = nil)
+        transaction_manager.check_transaction_lock!
         sql, binds = sql_for_insert(sql, pk, binds)
         internal_exec_query(sql, name, binds)
       end
@@ -154,6 +158,7 @@ module ActiveRecord
       # +binds+ as the bind substitutes. +name+ is logged along with
       # the executed +sql+ statement.
       def exec_delete(sql, name = nil, binds = [])
+        transaction_manager.check_transaction_lock!
         internal_exec_query(sql, name, binds)
       end
 
@@ -161,10 +166,12 @@ module ActiveRecord
       # +binds+ as the bind substitutes. +name+ is logged along with
       # the executed +sql+ statement.
       def exec_update(sql, name = nil, binds = [])
+        transaction_manager.check_transaction_lock!
         internal_exec_query(sql, name, binds)
       end
 
       def exec_insert_all(sql, name) # :nodoc:
+        transaction_manager.check_transaction_lock!
         internal_exec_query(sql, name)
       end
 
@@ -326,6 +333,7 @@ module ActiveRecord
       # isolation level.
       #  :args: (requires_new: nil, isolation: nil, &block)
       def transaction(requires_new: nil, isolation: nil, joinable: true, &block)
+        transaction_manager.check_transaction_lock!
         if !requires_new && current_transaction.joinable?
           if isolation
             raise ActiveRecord::TransactionIsolationError, "cannot set isolation when joining a transaction"
@@ -598,6 +606,7 @@ module ActiveRecord
 
         # Returns an ActiveRecord::Result instance.
         def select(sql, name = nil, binds = [], prepare: false, async: false)
+          transaction_manager.check_transaction_lock!
           if async && async_enabled?
             if current_transaction.joinable?
               raise AsynchronousQueryInsideTransactionError, "Asynchronous queries are not allowed inside transactions"

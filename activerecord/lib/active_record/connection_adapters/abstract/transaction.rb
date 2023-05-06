@@ -362,6 +362,7 @@ module ActiveRecord
         @has_unmaterialized_transactions = false
         @materializing_transactions = false
         @lazy_transactions_enabled = true
+        @locks = []
       end
 
       def begin_transaction(isolation: nil, joinable: true, _lazy: true)
@@ -485,11 +486,15 @@ module ActiveRecord
       end
 
       def within_new_transaction(isolation: nil, joinable: true)
-        @connection.lock.synchronize do
+        with_transaction_lock do |lock|
           transaction = begin_transaction(isolation: isolation, joinable: joinable)
           ret = yield
           completed = true
           ret
+        rescue ActiveRecord::TransactionIsolationError => error
+          # Allow any parent transactions to continue if we failed to begin.
+          discard_transaction_lock(lock) unless transaction
+          raise
         rescue Exception => error
           if transaction
             rollback_transaction
@@ -498,12 +503,8 @@ module ActiveRecord
 
           raise
         ensure
-          if transaction
-            if error
-              # @connection still holds an open or invalid transaction, so we must not
-              # put it back in the pool for reuse.
-              @connection.throw_away! unless transaction.state.rolledback?
-            else
+          begin
+            if transaction && error.nil?
               if Thread.current.status == "aborting"
                 rollback_transaction
               elsif !completed && transaction.written
@@ -539,7 +540,18 @@ module ActiveRecord
                 end
               end
             end
+          ensure
+            # By default, the connection will be throw away if there was an error. But if the commit or rollback
+            # succeeded, we can discard the current lock and allow any parent transactions to continue.
+            discard_transaction_lock(lock) if transaction&.state&.completed?
           end
+        end
+      end
+
+      def check_transaction_lock!
+        unless @locks.all?(&:locked?)
+          @connection.throw_away!
+          raise ActiveRecord::TransactionStateUnknown
         end
       end
 
@@ -559,6 +571,30 @@ module ActiveRecord
           return unless transaction.is_a?(RealTransaction)
           return unless error.is_a?(ActiveRecord::PreparedStatementCacheExpired)
           @connection.clear_cache!
+        end
+
+        def discard_transaction_lock(lock)
+          raise ActiveRecord::TransactionNotFound unless @locks.last&.locked? && @locks.last.eql?(lock)
+
+          @locks.pop
+        end
+
+        def with_transaction_lock
+          @connection.lock.synchronize do
+            check_transaction_lock!
+            lock = Mutex.new
+            @locks.push(lock)
+            lock.synchronize do
+              yield lock
+            rescue Exception => error
+              @connection.throw_away! if @locks.last.eql?(lock)
+              raise
+            ensure
+              if error.nil? && @locks.last.eql?(lock)
+                @locks.pop
+              end
+            end
+          end
         end
     end
   end
