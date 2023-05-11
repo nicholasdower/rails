@@ -362,6 +362,7 @@ module ActiveRecord
         @has_unmaterialized_transactions = false
         @materializing_transactions = false
         @lazy_transactions_enabled = true
+        @lock_stack = []
       end
 
       def begin_transaction(isolation: nil, joinable: true, _lazy: true)
@@ -486,6 +487,12 @@ module ActiveRecord
 
       def within_new_transaction(isolation: nil, joinable: true)
         @connection.lock.synchronize do
+      raise 'transaction state unknown' unless @lock_stack.all?(&:locked?)
+
+      transaction_lock = Mutex.new
+      @lock_stack << transaction_lock
+
+      transaction_lock.synchronize do
           transaction = begin_transaction(isolation: isolation, joinable: joinable)
         begin
           ret = yield
@@ -547,8 +554,12 @@ module ActiveRecord
         elsif !transaction.state.completed?
           @connection.throw_away!
         end
+        @lock_stack.delete(transaction_lock)
 
         raise
+      ensure
+        @lock_stack.delete(transaction_lock) unless transaction_error
+      end
       end
       end
 
